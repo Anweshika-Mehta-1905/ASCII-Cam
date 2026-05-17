@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ASCII Cam</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #000;
+      color: #fff;
+      font-family: 'Courier New', Courier, monospace;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    h1 {
+      font-size: clamp(1rem, 3vw, 1.5rem);
+      letter-spacing: 0.3em;
+      color: #ff69b4;
+      text-transform: uppercase;
+      margin-bottom: 1.5rem;
+      text-shadow: 0 0 12px #ff69b480;
+    }
+
+    #start-btn {
+      background: transparent;
+      border: 1px solid #ff69b4;
+      color: #ff69b4;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 1rem;
+      letter-spacing: 0.2em;
+      padding: 0.75rem 2rem;
+      cursor: pointer;
+      text-transform: uppercase;
+      transition: background 0.2s, color 0.2s, box-shadow 0.2s;
+    }
+
+    #start-btn:hover {
+      background: #ff69b420;
+      box-shadow: 0 0 16px #ff69b460;
+    }
+
+    #ui {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    #subtitle {
+      font-size: 0.75rem;
+      color: #ff69b480;
+      letter-spacing: 0.15em;
+      margin-top: 0.5rem;
+    }
+
+    /* The visible ASCII canvas, centered */
+    #ascii-canvas {
+      display: none;
+      image-rendering: pixelated;
+    }
+
+    /* Controls bar shown after camera starts */
+    #controls {
+      display: none;
+      align-items: center;
+      gap: 1.5rem;
+      margin-top: 0.75rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    #controls label {
+      font-size: 0.7rem;
+      color: #ff69b480;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    #controls input[type="range"] {
+      accent-color: #ff69b4;
+      width: 90px;
+    }
+
+    #controls select {
+      background: #000;
+      border: 1px solid #ff69b450;
+      color: #ff69b4;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 0.7rem;
+      padding: 2px 6px;
+      cursor: pointer;
+    }
+
+    #stop-btn {
+      background: transparent;
+      border: 1px solid #ff69b450;
+      color: #ff69b480;
+      font-family: 'Courier New', Courier, monospace;
+      font-size: 0.65rem;
+      letter-spacing: 0.15em;
+      padding: 0.3rem 0.8rem;
+      cursor: pointer;
+      text-transform: uppercase;
+      transition: border-color 0.2s, color 0.2s;
+    }
+
+    #stop-btn:hover { border-color: #ff69b4; color: #ff69b4; }
+
+    #error-msg {
+      display: none;
+      color: #ff4488;
+      font-size: 0.85rem;
+      letter-spacing: 0.1em;
+      margin-top: 1rem;
+      text-align: center;
+      max-width: 340px;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>ASCII CAM</h1>
+
+  <!-- Landing UI shown before camera starts -->
+  <div id="ui">
+    <button id="start-btn">▶ Start Camera</button>
+    <p id="subtitle">live feed rendered in pink ascii art</p>
+    <p id="error-msg"></p>
+  </div>
+
+  <!-- The canvas where ASCII art is drawn -->
+  <canvas id="ascii-canvas"></canvas>
+
+  <!-- Controls shown while camera is active -->
+  <div id="controls">
+    <label>
+      Resolution
+      <select id="res-select">
+        <option value="80">Low (80)</option>
+        <option value="120" selected>Medium (120)</option>
+        <option value="180">High (180)</option>
+      </select>
+    </label>
+    <label>
+      Brightness
+      <input type="range" id="brightness" min="-80" max="80" value="0" step="1" />
+    </label>
+    <label>
+      Contrast
+      <input type="range" id="contrast" min="0.5" max="2.5" value="1" step="0.05" />
+    </label>
+    <label>
+      Mirror
+      <input type="checkbox" id="mirror" checked />
+    </label>
+    <button id="stop-btn">■ Stop</button>
+  </div>
+
+  <!-- Hidden video + processing canvas — never shown to the user -->
+  <video id="hidden-video" autoplay playsinline muted style="display:none"></video>
+  <canvas id="process-canvas" style="display:none"></canvas>
+
+  <script>
+    /*
+     * ASCII character ramp ordered from "empty/dark" → "dense/bright".
+     * Shorter ramps feel chunkier; longer ones add tonal nuance.
+     * Each character's visual weight approximates ink coverage at small sizes.
+     */
+    const ASCII_RAMP = ' .\'`^",:;Il!i><~+_-?][}{1)(|/tfjrxnuvczXYUJCLQ0OZmwqpdbkhao*#MW&8%B@$';
+    const RAMP_LEN   = ASCII_RAMP.length;
+
+    /*
+     * Pink colour scale — maps a normalised brightness (0→1) to an RGB string.
+     * We interpolate through four pink stops:
+     *   0.00 → #000000  (pitch black  — truly dark areas are empty / space char)
+     *   0.25 → #6b0030  (deep rose)
+     *   0.55 → #ff1493  (hot pink)
+     *   0.80 → #ff69b4  (hot pink / bubblegum)
+     *   1.00 → #ffd6e8  (pastel blush)
+     * Using colour stops rather than a single tint preserves the neon feel.
+     */
+    const PINK_STOPS = [
+      { t: 0.00, r:   0, g:   0, b:   0 },
+      { t: 0.25, r: 107, g:   0, b:  48 },
+      { t: 0.55, r: 255, g:  20, b: 147 },
+      { t: 0.80, r: 255, g: 105, b: 180 },
+      { t: 1.00, r: 255, g: 214, b: 232 },
+    ];
+
+    function brightnessToColor(norm) {
+      /* Find the two surrounding stops and linearly interpolate between them */
+      let lo = PINK_STOPS[0], hi = PINK_STOPS[PINK_STOPS.length - 1];
+      for (let i = 0; i < PINK_STOPS.length - 1; i++) {
+        if (norm >= PINK_STOPS[i].t && norm <= PINK_STOPS[i + 1].t) {
+          lo = PINK_STOPS[i]; hi = PINK_STOPS[i + 1]; break;
+        }
+      }
+      const span = hi.t - lo.t || 1;
+      const f    = (norm - lo.t) / span;           // 0→1 within this sub-range
+      const r    = Math.round(lo.r + f * (hi.r - lo.r));
+      const g    = Math.round(lo.g + f * (hi.g - lo.g));
+      const b    = Math.round(lo.b + f * (hi.b - lo.b));
+      return `rgb(${r},${g},${b})`;
+    }
+
+    // ─── DOM refs ──────────────────────────────────────────────────────────────
+    const startBtn      = document.getElementById('start-btn');
+    const stopBtn       = document.getElementById('stop-btn');
+    const uiEl          = document.getElementById('ui');
+    const controlsEl    = document.getElementById('controls');
+    const errorMsg      = document.getElementById('error-msg');
+    const asciiCanvas   = document.getElementById('ascii-canvas');
+    const procCanvas    = document.getElementById('process-canvas');
+    const video         = document.getElementById('hidden-video');
+    const resSelect     = document.getElementById('res-select');
+    const brightnessIn  = document.getElementById('brightness');
+    const contrastIn    = document.getElementById('contrast');
+    const mirrorCheck   = document.getElementById('mirror');
+
+    const ctx  = asciiCanvas.getContext('2d');
+    const pCtx = procCanvas.getContext('2d', { willReadFrequently: true });
+
+    let stream       = null;
+    let rafId        = null;
+    let cols         = 120;       // number of character columns
+    let charW        = 8;         // px width of one character cell on asciiCanvas
+    let charH        = 14;        // px height of one character cell
+    let fontSize     = 11;
+
+    /*
+     * Measure the exact pixel dimensions of the monospaced font so character
+     * cells tile perfectly with no overlap or gap.
+     */
+    function measureFont(size) {
+      const tmpC = document.createElement('canvas');
+      const tmpX = tmpC.getContext('2d');
+      tmpX.font  = `${size}px "Courier New", monospace`;
+      const m    = tmpX.measureText('W');
+      charW      = Math.ceil(m.width);
+      charH      = Math.ceil(size * 1.25);   // ~1.25 line-height feels right
+      fontSize   = size;
+    }
+
+    function setupCanvases() {
+      cols = parseInt(resSelect.value, 10);
+
+      /* Fit cols into the viewport, choosing a font size that fills width */
+      const maxW   = Math.min(window.innerWidth  - 16, 1200);
+      const maxH   = Math.min(window.innerHeight - 140, 900);
+      fontSize     = Math.max(7, Math.floor(maxW / cols));
+      measureFont(fontSize);
+
+      /* Keep ~16:9 aspect of the webcam (mirrored, so we don't flip the math) */
+      const rows   = Math.floor((cols * 9 / 16) * (charW / charH));
+
+      asciiCanvas.width  = cols * charW;
+      asciiCanvas.height = rows * charH;
+
+      /* Clamp to viewport */
+      const scaleX = maxW  / asciiCanvas.width;
+      const scaleY = maxH  / asciiCanvas.height;
+      const scale  = Math.min(1, scaleX, scaleY);
+      asciiCanvas.style.width  = Math.round(asciiCanvas.width  * scale) + 'px';
+      asciiCanvas.style.height = Math.round(asciiCanvas.height * scale) + 'px';
+
+      /* Processing canvas samples the video at exactly cols×rows pixels */
+      procCanvas.width  = cols;
+      procCanvas.height = rows;
+
+      ctx.font        = `${fontSize}px "Courier New", monospace`;
+      ctx.textBaseline = 'top';
+    }
+
+    // ─── Main render loop ─────────────────────────────────────────────────────
+    function render() {
+      rafId = requestAnimationFrame(render);
+
+      const brightOffset = parseInt(brightnessIn.value, 10);   // –80 … +80
+      const contrastMul  = parseFloat(contrastIn.value);        //  0.5 … 2.5
+      const mirror       = mirrorCheck.checked;
+
+      const rows = procCanvas.height;
+
+      /* 1. Stamp the live video frame onto the tiny processing canvas.
+       *    Drawing at cols×rows resolution is far cheaper than full HD. */
+      pCtx.save();
+      if (mirror) {
+        pCtx.translate(cols, 0);
+        pCtx.scale(-1, 1);
+      }
+      pCtx.drawImage(video, 0, 0, cols, rows);
+      pCtx.restore();
+
+      /* 2. Read all pixel data in one call — avoid per-pixel getImageData calls */
+      const { data } = pCtx.getImageData(0, 0, cols, rows);
+
+      /* 3. Clear the ASCII canvas to black */
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, asciiCanvas.width, asciiCanvas.height);
+
+      /* 4. For each pixel block, map brightness → character & colour */
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const i = (row * cols + col) * 4;
+          const r = data[i], g = data[i + 1], b = data[i + 2];
+
+          /*
+           * Perceived luminance: human eyes are most sensitive to green,
+           * less to red, least to blue. This weighting (ITU-R BT.601)
+           * gives more natural brightness than a simple average.
+           */
+          let lum = 0.299 * r + 0.587 * g + 0.114 * b;
+
+          /*
+           * Apply user brightness offset then contrast scaling.
+           * Contrast is applied around the midpoint (128) so dark areas
+           * get darker and bright areas get brighter symmetrically.
+           */
+          lum = (lum - 128) * contrastMul + 128 + brightOffset;
+          lum = Math.max(0, Math.min(255, lum));
+
+          /* Normalised 0→1 brightness used for both char selection & colour */
+          const norm = lum / 255;
+
+          /*
+           * Character selection: multiply norm by ramp length.
+           * norm≈0 → first char (space), norm≈1 → last char (@/$).
+           * Clamp to avoid an off-by-one at exactly 1.0.
+           */
+          const charIndex = Math.min(Math.floor(norm * RAMP_LEN), RAMP_LEN - 1);
+          const char      = ASCII_RAMP[charIndex];
+
+          /* Blank/space pixels: skip drawing to keep the background pure black */
+          if (char === ' ') continue;
+
+          /* Colour derived from the same normalised brightness */
+          ctx.fillStyle = brightnessToColor(norm);
+          ctx.fillText(char, col * charW, row * charH);
+        }
+      }
+    }
+
+    // ─── Start / stop ─────────────────────────────────────────────────────────
+    async function startCamera() {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        setupCanvases();
+        uiEl.style.display         = 'none';
+        asciiCanvas.style.display  = 'block';
+        controlsEl.style.display   = 'flex';
+
+        render();
+      } catch (err) {
+        errorMsg.textContent = `Camera error: ${err.message}`;
+        errorMsg.style.display = 'block';
+      }
+    }
+
+    function stopCamera() {
+      cancelAnimationFrame(rafId);
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      stream = null;
+
+      asciiCanvas.style.display  = 'none';
+      controlsEl.style.display   = 'none';
+      uiEl.style.display         = 'flex';
+    }
+
+    startBtn.addEventListener('click', startCamera);
+    stopBtn.addEventListener('click',  stopCamera);
+
+    /* Re-layout when resolution picker or window size changes */
+    resSelect.addEventListener('change', () => { if (stream) setupCanvases(); });
+    window.addEventListener('resize',    () => { if (stream) setupCanvases(); });
+  </script>
+</body>
+</html>
